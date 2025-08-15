@@ -1,76 +1,71 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import re
-from typing import Dict, Any, List
+from datetime import datetime
+import json
+from urllib.parse import parse_qs
 
-app = FastAPI(title="SA Automotors Bot", version="0.0.2")
+app = FastAPI()
+LEADS = []
 
-LEADS: List[Dict[str, Any]] = []
+def normalize(s):
+    return s.strip() if isinstance(s, str) else s
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "leads": len(LEADS)}
+@app.post("/new-lead")
+async def new_lead(request: Request):
+    raw = await request.body()
+    data = None
 
-def normalize_phone_za(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("+27"):
-        return raw
-    digits = re.sub(r"\D", "", raw)
-    if digits.startswith("27"):
-        return f"+{digits}"
-    if digits.startswith("0"):
-        return f"+27{digits[1:]}"
-    return f"+{digits}" if digits else raw
-
-def parse_card_desc(desc: str) -> Dict[str, str]:
-    fields = {"client_name": "", "phone": "", "car": "", "notes": ""}
-    if not desc:
-        return fields
-    for line in desc.splitlines():
-        m = re.match(r"\s*([A-Za-z ]+)\s*:\s*(.+)\s*$", line)
-        if not m:
-            continue
-        key = m.group(1).strip().lower()
-        val = m.group(2).strip()
-        if key in ("client name", "name", "seller"):
-            fields["client_name"] = val
-        elif key in ("phone", "cell", "cellphone", "mobile", "number"):
-            fields["phone"] = normalize_phone_za(val)
-        elif key in ("car", "vehicle", "make/model", "vehicle info"):
-            fields["car"] = val
-        elif key in ("notes", "note", "comments"):
-            fields["notes"] = val
-    return fields
-
-@app.post("/trello/inbound")
-async def trello_inbound(request: Request):
+    # 1) Try direct JSON
     try:
-        data = await request.json()
+        data = json.loads(raw.decode("utf-8"))
     except Exception:
-        body = await request.body()
-        return JSONResponse({"ok": True, "raw": body.decode("utf-8")})
+        pass
 
-    parsed = parse_card_desc(data.get("desc", ""))
+    # 2) Try unescaping \"...\" JSON Trello sometimes produces
+    if data is None:
+        try:
+            txt = raw.decode("utf-8")
+            txt2 = txt.replace('\\"', '"')
+            data = json.loads(txt2)
+        except Exception:
+            pass
 
-    lead = {
-        "card_id": data.get("card_id"),
-        "card_name": data.get("card_name"),
-        "card_url": data.get("card_url"),
-        "board": data.get("board_name"),
-        "list": data.get("list_name"),
-        "client_name": parsed["client_name"],
-        "phone": parsed["phone"],
-        "car": parsed["car"],
-        "notes": parsed["notes"],
+    # 3) Try form / querystring (name=a&description=b...)
+    if data is None:
+        try:
+            form = await request.form()
+            if form:
+                data = {k: normalize(v) for k, v in form.items()}
+        except Exception:
+            pass
+    if data is None:
+        try:
+            qs = raw.decode("utf-8")
+            parsed = {k: v[0] for k, v in parse_qs(qs).items()}
+            if parsed:
+                data = parsed
+        except Exception:
+            pass
+
+    if data is None:
+        return {"ok": False, "reason": "Could not parse body", "raw": raw.decode("utf-8")[:500]}
+
+    item = {
+        "received_at": datetime.utcnow().isoformat() + "Z",
+        "name": normalize(data.get("name")),
+        "description": normalize(data.get("description")),
+        "url": normalize(data.get("url")),
+        "list": normalize(data.get("list")),
+        "board": normalize(data.get("board")),
+        "raw": data,
     }
-    LEADS.append(lead)
-
-    print("=== New Lead Parsed ===")
-    for k, v in lead.items():
-        print(f"{k}: {v}")
-
-    return {"ok": True, "parsed": lead}
+    LEADS.append(item)
+    print("=== New Lead ===", item)
+    return {"ok": True, "stored": item}
 
 @app.get("/leads")
 def list_leads():
     return {"count": len(LEADS), "items": LEADS}
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "leads": len(LEADS)}
