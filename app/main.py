@@ -12,18 +12,7 @@ def health():
 def list_leads():
     return {"count": len(LEADS), "items": LEADS}
 
+@app.get("/new-lead")
 @app.post("/new-lead")
-async def new_lead(req: Request):
-    data = await req.json()
-    item = {
-        "received_at": datetime.utcnow().isoformat() + "Z",
-        "name": data.get("name"),
-        "description": data.get("description"),
-        "url": data.get("url"),
-        "list": data.get("list"),
-        "board": data.get("board"),
-        "raw": data,
-    }
-    LEADS.append(item)
-    print("=== New Lead ===", item)
-    return {"ok": True}
+async def new_lead(data: dict = None):
+    return {"status": "lead received", "data": data}
